@@ -1,0 +1,369 @@
+#!/bin/bash +x
+
+#netem has inner queue if packets (implemented as a pfifo qdisc) so if both netem and tbf are enabled
+#and netem goes after tbf then total traffic will be limited by netem's "limit" option and tbf's "limit"
+#won't have any effect
+#netem "limit" option has same meaning as tbf "limit" option so in typical case of mss=1.5Kb
+#10 pkts will mean 15Kb
+TBF_BUFFER_SIZE_PKTS=1000
+
+PROTOCOL="ip"
+INTERFACE="eth0"
+FROM='none'
+TO='none'
+TBF_SETTINGS=''
+NETEM_SETTINGS=''
+NETEM_REORDER_IF_JITTER='false'
+ACTION="enable"
+
+usage()
+{
+echo "
+Usage: sudo lossy -n 'delay 100ms 10ms 25% loss 0.1%' -t 'rate 0.5mbit burst 10kb limit 10k' --from 127.0.0.1:* --to *:80
+
+Lossy uses traffic control (tc) utility to simulate lossy/shaped network for testing purposes and provides easier way
+to do this than using tc directly.
+
+Options:
+
+-s - print status.
+-c - clear all rules.
+-t|--tbf <tbf-settings> - set network shaping setting that are passed to token bucket filter, example 'rate 0.5mbit burst 10kb limit 10k'.
+                          See 'man tbf' for details. Default ''.
+-n|--netem <netem-settings> - set delay/loss settings that are passed to netem, example 'delay 100ms 10ms 25% loss 0.1%'.
+                              See 'man netem' for details. Default ''.
+--from <host[/mask]:port|none> - match only packets from this address, example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+                          Special value 'none' - match none. Default 'none'. Host with mask can be specified.
+--to <host[/mask]:port|none> - match only packets from to this address, example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+                        Special value 'none' - match none. Default 'none'. Host with mask can be specified.
+-p|--protocol <protocol> - matches only this protocol packets, example 'ip', 'tcp', 'udp'. Default 'ip' - matches ip, tcp, udp, etc packets.
+-i|--interface <interface> - matches only on this interface, example 'eth0', 'lo'. Default 'eth0'.
+-r|--reorder-if-jitter <true|false> - if jitter is specified for netem then should it reorder packets or send them in order. Default 'false' - send in order.
+
+Important notes:
+
+* Must be run as root.
+
+* Clears existing rules on specified interface before adding new rules, so if you launched it with '-i eth0' and then '-i lo'
+  then rules on eth0 will remain. When invoking lossy with -c you can also add -i to specify interface to clear.
+
+* Options --from and --to each is applied both to incoming and outgoing traffic. Example: -netem 'delay 100ms' --to '*:*',
+  we ping this machine and get 200ms roundtrip time because incoming packets matches *:* and reply packet also matches rule.
+  If you want to affect only upstream/downstream you will have to specify ip or mask so that packets to/from this machine
+  are not matched. Example: this machine has ip 192.168.1.1 and we add rule --to 192.168.1.1 this will result in 100ms
+  rountrip, incoming packets will have 100ms delay while outgoing will have 0ms delay.
+
+* Lossy uses ethtool to verify environment correctness, it is not required to run, but may tell you about some problems
+  that can cause incorrect behavior.
+
+* All settings are applied both to outgoing traffic and incoming traffic, so if you specify delay 100ms then roundtrip
+  time will be 200ms. Use --from and --to to match packets more granularly.
+
+* Remember that your ssh session is affected by lossy also, so if you specify large delay, jitter, packet loss you may
+  not be able to disable it via ssh. However all settings are reset after system reboot.
+
+* If both tbf and netem enabled then netem goes after tbf.
+
+* No need to specify 'limit' in tbf settings if netem is enabled, because netem also has 'limit' option and internal
+  pfifo qdisc, so traffic will mainly be affected by this setting which we set to 20 (packets) by default.
+
+* If 'large segment offload' option (also known as TSO/GSO) is enabled in kernel (check with 'ethtool -k eth0') then
+  inside kernel packets can be larger than MTU and be broken into MTU-size chunks only by network interface. This leads
+  to tbf limiting speed to very low value (10-20Kb/sec) despite of settings. If this is the case recommended approach
+  is to disable TSO/GSO, this doesn't affect functionality, but may slightly increase CPU usage in case of large amounts
+  of traffic.
+
+* Netem has a reordering bug/feature - if jitter is specified like 'delay 100ms 50ms' then packets will be reordered. Docs
+  suggest adding child pfifo qdisc, but it doesn't work in 3.2-4.2 kernels, but there is undocumented behavior that if
+  'rate' netem option is specified then no reordering occurs. Option was added in attempt to bring tbf functionality into
+  netem but has this side effect. So we simply have -r flag to prevent reordering, it results in adding large 'rate' value.
+  Seems several rates can be specified and the last one takes effect so we prepend our value to allow overriding.
+
+* When configuring tbf set burst and limit high enough. Min burst is rate/250 (HZ=250 in many linux kernels) so 40k is
+  required to reach 10Mb/sec speed. Sometimes packets can even fail to queue at all if limit is low (-s shows drops
+  increasing, but sent bytes stays the same) so always check your configuration with iperf.
+"
+}
+
+status()
+{
+    echo "Outgoing traffic settings for interface $INTERFACE"
+    tc qdisc show dev eth0
+    tc -s filter show dev eth0
+    echo
+    echo "Incoming traffic settings for interface $INTERFACE"
+    tc qdisc show dev ifb0
+    tc -s filter show dev ifb0
+    echo
+    echo "Statistics for interface $INTERFACE"
+    tc -s qdisc ls
+}
+
+clear()
+{
+    echo "Clearing rules for interface $INTERFACE"
+    tc qdisc del dev $INTERFACE root
+    tc qdisc del dev $INTERFACE ingress
+    tc qdisc del dev ifb0 root
+}
+
+checkTSO()
+{
+    if ! hash ethtool 2>/dev/null; then
+        echo "Recommend installing ethtool so we can verify environment correctness and report possible problems (not required)"
+        return
+    fi
+
+    if [ "x" != "x$TBF_SETTINGS" ]; then
+        #If "Large segment offload" (also called TSO/GSO) kernel option is enabled
+        #then kernel may operate large packets (like MTU is 16K for example) internally
+        #and only when packet reaches network interface it is broken into network-MTU-size
+        #chunks.
+        #In this options is on and TBF enabled then it will limit speed to very low value (10-20Kb/sec)
+        #despite of applied settings. Disabling TSO/GSO doesn't affect functionality but
+        #may cause some CPU overhead (not a problem unless you have really much traffic).
+        if ethtool -k $INTERFACE | egrep 'tcp-segmentation-offload: on|generic-segmentation-offload: on' > /dev/null ; then
+            echo "TSO/GSO must be disabled for network interface with following command (otherwise TBF works incorrectly): ethtool -K $INTERFACE tso off gso off"
+            exit 1
+        fi
+    fi
+}
+
+checkRoot()
+{
+    if [[ $EUID -ne 0 ]]; then
+       echo "This script must be run as root"
+       exit 1
+    fi
+}
+
+buildFromFilter()
+{
+    FILTER=""
+    if [ "none" == "$FROM" ]; then
+        return
+    elif [ "x" != "x$FROM" ]; then
+        IP=`getIp "$FROM"`
+        PORT=`getPort "$FROM"`
+        if [ "x" != "x$IP" ]; then
+            FILTER="$FILTER match $PROTOCOL src $IP"
+        else
+            #if ip not specified then we need to match all packets
+            FILTER="$FILTER match $PROTOCOL src 0/0"
+        fi
+
+        if [ "x" != "x$PORT" ]; then
+            FILTER="$FILTER match ip sport $PORT 0xffff"
+        fi
+    fi
+
+    echo $FILTER
+}
+
+buildToFilter()
+{
+    FILTER=""
+    if [ "none" == "$TO" ]; then
+        return
+    elif [ "x" != "x$TO" ]; then
+        IP=`getIp "$TO"`
+        PORT=`getPort "$TO"`
+        if [ "x" != "x$IP" ]; then
+            FILTER="$FILTER match $PROTOCOL dst $IP"
+        else
+            #if ip not specified then we need to match all packets
+            FILTER="$FILTER match $PROTOCOL dst 0/0"
+        fi
+
+        if [ "x" != "x$PORT" ]; then
+            FILTER="$FILTER match ip dport $PORT 0xffff"
+        fi
+    fi
+
+    echo $FILTER
+}
+
+enableEgress()
+{
+    #first add prio queue to split traffic - with it we can apply limits to single band
+    tc qdisc add dev $INTERFACE root handle 1: prio
+    PARENT_QDISC_HANDLE="1:3"
+
+    if [ "x" != "x$TBF_SETTINGS" ]; then
+        eval "tc qdisc add dev $INTERFACE parent $PARENT_QDISC_HANDLE handle 10: tbf $TBF_SETTINGS"
+        PARENT_QDISC_HANDLE="10:0"
+    fi
+
+    if [ "x" != "x$NETEM_SETTINGS" ]; then
+        eval "tc qdisc add dev $INTERFACE parent $PARENT_QDISC_HANDLE handle 11: netem $NETEM_SETTINGS limit $TBF_BUFFER_SIZE_PKTS"
+    fi;
+
+    FROM_FILTER=`buildFromFilter`
+    TO_FILTER=`buildToFilter`
+    if [ "x" != "x$FROM_FILTER" ]; then
+        eval "tc filter add dev $INTERFACE protocol $PROTOCOL parent 1:0 prio 3 u32 $FROM_FILTER flowid 1:3"
+    fi;
+    if [ "x" != "x$TO_FILTER" ]; then
+        eval "tc filter add dev $INTERFACE protocol $PROTOCOL parent 1:0 prio 3 u32 $TO_FILTER flowid 1:3"
+    fi;
+}
+
+enableIngress()
+{
+    #tc exists to control how we send (egress) traffic and it is expected that we want
+    #to process received (ingress) traffic without introducing any queues however for test
+    #purposes we may want to shape incoming traffic so we have to redirect it via virtual interface
+    #and handle it like it is egress traffic
+    modprobe ifb
+    ip link set dev ifb0 up
+    tc qdisc add dev $INTERFACE ingress
+    tc filter add dev $INTERFACE parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0
+
+    tc qdisc add dev ifb0 root handle 2: prio
+    PARENT_QDISC_HANDLE="2:3"
+
+     if [ "x" != "x$TBF_SETTINGS" ]; then
+        eval "tc qdisc add dev ifb0 parent $PARENT_QDISC_HANDLE handle 20: tbf $TBF_SETTINGS"
+        PARENT_QDISC_HANDLE="20:0"
+    fi
+
+    if [ "x" != "x$NETEM_SETTINGS" ]; then
+        eval "tc qdisc add dev ifb0 parent $PARENT_QDISC_HANDLE handle 21: netem $NETEM_SETTINGS limit $TBF_BUFFER_SIZE_PKTS"
+    fi;
+
+    FROM_FILTER=`buildFromFilter`
+    TO_FILTER=`buildToFilter`
+    if [ "x" != "x$FROM_FILTER" ]; then
+        eval "tc filter add dev ifb0 protocol $PROTOCOL parent 2:0 prio 3 u32 $FROM_FILTER flowid 1:3"
+    fi;
+    if [ "x" != "x$TO_FILTER" ]; then
+        eval "tc filter add dev ifb0 protocol $PROTOCOL parent 2:0 prio 3 u32 $TO_FILTER flowid 1:3"
+    fi;
+}
+
+enable()
+{
+    checkTSO
+    enableEgress
+    enableIngress
+    echo 'New settings applied'
+}
+
+getIp()
+{
+    OIFS="$IFS"
+    IFS=':'
+    read -a IP_PORT <<< "$1"
+    IFS="$OIFS"
+    #if wildcard is given output empty string to match everything
+    echo "${IP_PORT[0]}" | tr -d '*'
+}
+
+getPort()
+{
+    OIFS="$IFS"
+    IFS=':'
+    read -a IP_PORT <<< "$1"
+    IFS="$OIFS"
+    shift
+    #if wildcard is given output empty string to match everything
+    echo "${IP_PORT[1]}" | tr -d '*'
+}
+
+printArgs()
+{
+    echo "Interface: $INTERFACE"
+    echo "Protocol: $PROTOCOL"
+    echo "From: ${FROM:-*:*}"
+    echo "To: ${TO:-*:*}"
+    echo "TBF settings: $TBF_SETTINGS"
+    echo "Netem settings: $NETEM_SETTINGS"
+    echo "Reorder packets during jitter: $NETEM_REORDER_IF_JITTER"
+}
+
+if [ "$#" == 0 ]; then
+    usage
+    exit 0
+fi
+
+while [[ $# -gt 0 ]]
+do
+    key="$1"
+
+    case $key in
+
+        -h|--help|'-?')
+            usage
+            exit 0
+        ;;
+
+        -s|--status)
+            ACTION="status"
+        ;;
+
+        -t|--tbf)
+            shift
+            TBF_SETTINGS=$1
+        ;;
+
+        -n|--netem)
+            shift
+            NETEM_SETTINGS=$1
+        ;;
+
+       --from)
+            shift
+            FROM=$1
+        ;;
+
+       --to)
+            shift
+            TO=$1
+        ;;
+
+        -i|--interface)
+            shift
+            INTERFACE=$1
+        ;;
+
+        -p|--protocol)
+            shift
+            PROTOCOL=$1
+        ;;
+
+        -r|--reorder-if-jitter)
+            shift
+            NETEM_REORDER_IF_JITTER=$1
+        ;;
+
+        -c|--clear)
+            ACTION="clear"
+        ;;
+
+        *)
+            echo "Unknown option $key"
+            exit 1
+        ;;
+
+    esac
+    shift
+done
+
+if [ "clear" == "$ACTION" ]; then
+    checkRoot
+    clear
+    exit 0
+elif [ "status" == "$ACTION" ]; then
+    status
+    exit 0
+elif  [ "enable" == "$ACTION" ]; then
+    if [ "false" == "$NETEM_REORDER_IF_JITTER" ]; then
+        #latest version of netem only prevents reorder if rate is added
+        NETEM_SETTINGS="rate 10Gbit $NETEM_SETTINGS"
+    fi
+
+    checkRoot
+    printArgs
+    clear
+    enable
+fi
