@@ -420,7 +420,7 @@ elif [ "status" == "$ACTION" ]; then
     status
     exit 0
 elif  [ "enable" == "$ACTION" ]; then
-    if [ "false" == "$NETEM_REORDER_IF_JITTER" ]; then
+    if [ "false" == "$NETEM_REORDER_IF_JITTER" ] && [ "x" != "x$NETEM_SETTINGS" ]; then
         #latest version of netem only prevents reorder if rate is added
         NETEM_SETTINGS="rate 10Gbit $NETEM_SETTINGS"
     fi
@@ -430,7 +430,7 @@ elif  [ "enable" == "$ACTION" ]; then
     clear
     enable
 
-    if [ "false" == "$NETEM_REORDER_IF_JITTER" ]; then
+    if [ "false" == "$NETEM_REORDER_IF_JITTER" ] && [ "x" != "x$NETEM_SETTINGS" ]; then
         #check that 'rate' param is supported and was set
         if ! tc -s qdisc ls | grep netem | grep rate &>/dev/null; then
             echo "This netem version always reorders packets based on jitter, -r option omitted"
