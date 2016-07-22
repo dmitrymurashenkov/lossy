@@ -24,8 +24,18 @@ Usage: sudo lossy -n 'delay 100ms 10ms 25% loss 0.1%' \
                   --from 127.0.0.1:* \
                   --to *:80
 
-Lossy uses traffic control (tc) utility to simulate lossy/shaped network for testing purposes and provides easier way
-to do this than using tc directly.
+Wrapper for linux tc and netem tools. Simulate lossy/shaped networks the easy way.
+
+Lossy uses tc (traffic control) to build a chain of qdiscs (queues for packets) and simulate packet loss, delay
+or limited network bandwidth. It uses standard netem (network emulator) and tbf (token bucket filter) qdiscs for
+that purpose.
+
+However using tc directly can be tricky because of several known issues, so this tool is made to simplify usage and
+provide built-in detection/workarounds for some problems.
+
+Lossy sets rules that match incoming/outgoing traffic and applies policies to these packets:
+* To enabled packet loss/delay specify netem settings (it is better to check 'man netem' for detailed description.
+* To limit network bandwidth specify tbf settings (see 'man tbf')
 
 Options:
 
@@ -96,13 +106,13 @@ Important notes:
 * All settings are applied both to outgoing traffic and incoming traffic, so if you specify delay 100ms then roundtrip
   time will be 200ms. Use --from and --to to match packets more granularly.
 
-* Remember that your ssh session is affected by lossy also, so if you specify large delay, jitter, packet loss you may
-  not be able to disable it via ssh. However all settings are reset after system reboot.
+* Remember that your ssh session is affected by lossy also (if you alter -e option at least), so if you specify large
+  delay, jitter, packet loss you may not be able to disable it via ssh. However all settings are reset after system reboot.
 
 * If both tbf and netem enabled then netem goes after tbf.
 
 * No need to specify 'limit' in tbf settings if netem is enabled, because netem also has 'limit' option and internal
-  pfifo qdisc, so traffic will mainly be affected by this setting which we set to 20 (packets) by default.
+  pfifo qdisc, so traffic will mainly be affected by this setting which we set to 1000 (packets) by default.
 
 * If 'large segment offload' option (also known as TSO/GSO) is enabled in kernel (check with 'ethtool -k eth0') then
   inside kernel packets can be larger than MTU and be broken into MTU-size chunks only by network interface. This leads
@@ -118,7 +128,7 @@ Important notes:
 
 * When configuring tbf set burst and limit high enough. Min burst is rate/250 (HZ=250 in many linux kernels) so 40k is
   required to reach 10Mb/sec speed. Sometimes packets can even fail to queue at all if limit is low (-s shows drops
-  increasing, but sent bytes stays the same) so always check your configuration with iperf.
+  increasing, but sent bytes stays the same) so always verify your configuration with iperf and ping tools.
 "
 }
 
