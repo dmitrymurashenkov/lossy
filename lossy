@@ -7,7 +7,6 @@
 #10 pkts will mean 15Kb
 TBF_BUFFER_SIZE_PKTS=1000
 
-PROTOCOL="ip"
 INTERFACE="eth0"
 FROM='none'
 TO='none'
@@ -19,26 +18,54 @@ ACTION="enable"
 usage()
 {
 echo "
-Usage: sudo lossy -n 'delay 100ms 10ms 25% loss 0.1%' -t 'rate 0.5mbit burst 10kb limit 10k' --from 127.0.0.1:* --to *:80
+Usage: sudo lossy -n 'delay 100ms 10ms 25% loss 0.1%' \
+                  -t 'rate 0.5mbit burst 10kb limit 10k' \
+                  --from 127.0.0.1:* \
+                  --to *:80
 
 Lossy uses traffic control (tc) utility to simulate lossy/shaped network for testing purposes and provides easier way
 to do this than using tc directly.
 
 Options:
 
--s - print status.
--c - clear all rules.
--t|--tbf <tbf-settings> - set network shaping setting that are passed to token bucket filter, example 'rate 0.5mbit burst 10kb limit 10k'.
-                          See 'man tbf' for details. Default ''.
--n|--netem <netem-settings> - set delay/loss settings that are passed to netem, example 'delay 100ms 10ms 25% loss 0.1%'.
-                              See 'man netem' for details. Default ''.
---from <host[/mask]:port|none> - match only packets from this address, example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
-                          Special value 'none' - match none. Default 'none'. Host with mask can be specified.
---to <host[/mask]:port|none> - match only packets from to this address, example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
-                        Special value 'none' - match none. Default 'none'. Host with mask can be specified.
--p|--protocol <protocol> - matches only this protocol packets, example 'ip', 'tcp', 'udp'. Default 'ip' - matches ip, tcp, udp, etc packets.
--i|--interface <interface> - matches only on this interface, example 'eth0', 'lo'. Default 'eth0'.
--r|--reorder-if-jitter <true|false> - if jitter is specified for netem then should it reorder packets or send them in order. Default 'false' - send in order.
+-s
+    Print status.
+
+-c
+    Clear all rules.
+
+-t|--tbf <tbf-settings>
+    Set network shaping setting that are passed to token bucket filter.
+    Example 'rate 0.5mbit burst 10kb limit 10k'.
+    See 'man tbf' for details. Default ''.
+
+-n|--netem <netem-settings>
+    Set delay/loss settings that are passed to netem.
+    Example 'delay 100ms 10ms 25% loss 0.1%'.
+    See 'man netem' for details. Default ''.
+
+--from <host[/mask]:port|none>
+    Match only packets from this address.
+    Example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+    Special value 'none' - match none.
+    Default 'none'.
+    Host with mask can be specified.
+
+--to <host[/mask]:port|none>
+    Match only packets from to this address.
+    Example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+    Special value 'none' - match none.
+    Default 'none'.
+    Host with mask can be specified.
+
+-i|--interface <interface>
+    Matches only on this interface.
+    Example 'eth0', 'lo'.
+    Default 'eth0'.
+
+-r|--reorder-if-jitter <true|false>
+    If jitter is specified for netem then should it reorder packets or send them in order.
+    Default 'false' - send in order.
 
 Important notes:
 
@@ -146,10 +173,10 @@ buildFromFilter()
         IP=`getIp "$FROM"`
         PORT=`getPort "$FROM"`
         if [ "x" != "x$IP" ]; then
-            FILTER="$FILTER match $PROTOCOL src $IP"
+            FILTER="$FILTER match ip src $IP"
         else
             #if ip not specified then we need to match all packets
-            FILTER="$FILTER match $PROTOCOL src 0/0"
+            FILTER="$FILTER match ip src 0/0"
         fi
 
         if [ "x" != "x$PORT" ]; then
@@ -169,10 +196,10 @@ buildToFilter()
         IP=`getIp "$TO"`
         PORT=`getPort "$TO"`
         if [ "x" != "x$IP" ]; then
-            FILTER="$FILTER match $PROTOCOL dst $IP"
+            FILTER="$FILTER match ip dst $IP"
         else
             #if ip not specified then we need to match all packets
-            FILTER="$FILTER match $PROTOCOL dst 0/0"
+            FILTER="$FILTER match ip dst 0/0"
         fi
 
         if [ "x" != "x$PORT" ]; then
@@ -201,10 +228,10 @@ enableEgress()
     FROM_FILTER=`buildFromFilter`
     TO_FILTER=`buildToFilter`
     if [ "x" != "x$FROM_FILTER" ]; then
-        eval "tc filter add dev $INTERFACE protocol $PROTOCOL parent 1:0 prio 3 u32 $FROM_FILTER flowid 1:3"
+        eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 3 u32 $FROM_FILTER flowid 1:3"
     fi;
     if [ "x" != "x$TO_FILTER" ]; then
-        eval "tc filter add dev $INTERFACE protocol $PROTOCOL parent 1:0 prio 3 u32 $TO_FILTER flowid 1:3"
+        eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 3 u32 $TO_FILTER flowid 1:3"
     fi;
 }
 
@@ -234,10 +261,10 @@ enableIngress()
     FROM_FILTER=`buildFromFilter`
     TO_FILTER=`buildToFilter`
     if [ "x" != "x$FROM_FILTER" ]; then
-        eval "tc filter add dev ifb0 protocol $PROTOCOL parent 2:0 prio 3 u32 $FROM_FILTER flowid 1:3"
+        eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 3 u32 $FROM_FILTER flowid 1:3"
     fi;
     if [ "x" != "x$TO_FILTER" ]; then
-        eval "tc filter add dev ifb0 protocol $PROTOCOL parent 2:0 prio 3 u32 $TO_FILTER flowid 1:3"
+        eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 3 u32 $TO_FILTER flowid 1:3"
     fi;
 }
 
@@ -273,7 +300,6 @@ getPort()
 printArgs()
 {
     echo "Interface: $INTERFACE"
-    echo "Protocol: $PROTOCOL"
     echo "From: ${FROM:-*:*}"
     echo "To: ${TO:-*:*}"
     echo "TBF settings: $TBF_SETTINGS"
@@ -324,11 +350,6 @@ do
         -i|--interface)
             shift
             INTERFACE=$1
-        ;;
-
-        -p|--protocol)
-            shift
-            PROTOCOL=$1
         ;;
 
         -r|--reorder-if-jitter)
