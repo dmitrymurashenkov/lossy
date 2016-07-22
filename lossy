@@ -14,7 +14,7 @@ TBF_SETTINGS=''
 NETEM_SETTINGS=''
 NETEM_REORDER_IF_JITTER='false'
 ACTION="enable"
-EXCLUDE_PORT="22"
+EXCLUDE_PORTS="22"
 
 usage()
 {
@@ -68,9 +68,12 @@ Options:
     If jitter is specified for netem then should it reorder packets or send them in order.
     Default 'false' - send in order.
 
--e|--exclude-port
+-e|--exclude-ports <port[,port...]>
     Exclude traffic to/from this port from any host from matching.
     Used to prevent setting up rule that affects ssh session you run lossy in.
+    Example '22,80'.
+    Several port can be specified separated by comma.
+    Default '22'.
 
 Important notes:
 
@@ -122,8 +125,8 @@ Important notes:
 status()
 {
     echo "Outgoing traffic settings for interface $INTERFACE"
-    tc qdisc show dev eth0
-    tc -s filter show dev eth0
+    tc qdisc show dev $INTERFACE
+    tc -s filter show dev $INTERFACE
     echo
     echo "Incoming traffic settings for interface $INTERFACE"
     tc qdisc show dev ifb0
@@ -217,20 +220,18 @@ buildToFilter()
     echo $FILTER
 }
 
-buildExcludePortFilter()
-{
-    if [ "x" != "x$EXCLUDE_PORT" ]; then
-        echo "match ip src 0/0 match ip sport $EXCLUDE_PORT"
-    fi
-}
 
 addExcludePortFilter()
 {
-    if [ "x" != "x$EXCLUDE_PORT" ]; then
-        eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 u32 match ip src 0/0 match ip sport $EXCLUDE_PORT 0xffff flowid 1:1"
-        eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 u32 match ip src 0/0 match ip dport $EXCLUDE_PORT 0xffff flowid 1:1"
-        eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match ip src 0/0 match ip dport $EXCLUDE_PORT 0xffff flowid 2:1"
-        eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match ip src 0/0 match ip dport $EXCLUDE_PORT 0xffff flowid 2:1"
+    if [ "x" != "x$EXCLUDE_PORTS" ]; then
+        IFS=',' read -r -a PORTS <<< "$EXCLUDE_PORTS"
+        for PORT in "${PORTS[@]}"
+        do
+            eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 u32 match ip src 0/0 match ip sport $PORT 0xffff flowid 1:1"
+            eval "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 u32 match ip src 0/0 match ip dport $PORT 0xffff flowid 1:1"
+            eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match ip src 0/0 match ip dport $PORT 0xffff flowid 2:1"
+            eval "tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match ip src 0/0 match ip dport $PORT 0xffff flowid 2:1"
+        done
     fi
 }
 
@@ -327,7 +328,7 @@ printArgs()
     echo "Interface: $INTERFACE"
     echo "From: ${FROM:-*:*}"
     echo "To: ${TO:-*:*}"
-    echo "Exclude port: $EXCLUDE_PORT"
+    echo "Exclude ports: $EXCLUDE_PORTS"
     echo "TBF settings: $TBF_SETTINGS"
     echo "Netem settings: $NETEM_SETTINGS"
     echo "Reorder packets during jitter: $NETEM_REORDER_IF_JITTER"
@@ -389,7 +390,7 @@ do
 
         -e|--exclude-port)
             shift
-            EXCLUDE_PORT=$1
+            EXCLUDE_PORTS=$1
         ;;
 
         *)
@@ -418,4 +419,11 @@ elif  [ "enable" == "$ACTION" ]; then
     printArgs
     clear
     enable
+
+    if [ "false" == "$NETEM_REORDER_IF_JITTER" ]; then
+        #check that 'rate' param is supported and was set
+        if ! tc -s qdisc ls | grep netem | grep rate &>/dev/null; then
+            echo "This netem version always reorders packets based on jitter, -r option omitted"
+        fi
+    fi
 fi
