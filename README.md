@@ -24,43 +24,58 @@ Usage: sudo lossy -n 'delay 100ms 10ms 25% loss 0.1%' \
 Options:
 
 ```
--s                                   print status.
+-s
+    Print status.
 
--c                                   clear all rules.
+-c
+    Clear all rules.
 
--t|--tbf <tbf-settings>              set shaping settings that are passed to token bucket filter, 
-                                     example 'rate 0.5mbit burst 10kb limit 10k'.
-                                     See 'man tbf' for details. Default ''.
-                          
--n|--netem <netem-settings>          set delay/loss settings that are passed to netem, 
-                                     example 'delay 100ms 10ms 25% loss 0.1%'.
-                                     See 'man netem' for details. Default ''.
-                              
---from <host[/mask]:port|none>       match only packets from this address, 
-                                     example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
-                                     Special value 'none' - match none. 
-                                     Default 'none'. Host with mask can be specified.
-                          
---to <host[/mask]:port|none>         match only packets from to this address, 
-                                     example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
-                                     Special value 'none' - match none. 
-                                     Default 'none'. Host with mask can be specified.
-                        
--p|--protocol <protocol>             matches only this protocol packets, 
-                                     example 'ip', 'tcp', 'udp'. Default 'ip' - matches ip, tcp, udp, 
-                                     icmp and other ip packets.
+-t|--tbf <tbf-settings>
+    Set network shaping setting that are passed to token bucket filter.
+    Example 'rate 0.5mbit burst 10kb limit 10k'.
+    See 'man tbf' for details. Default ''.
 
--i|--interface <interface>           matches only on this interface, 
-                                     example 'eth0', 'lo'. Default 'eth0'.
+-n|--netem <netem-settings>
+    Set delay/loss settings that are passed to netem.
+    Example 'delay 100ms 10ms 25% loss 0.1%'.
+    See 'man netem' for details. Default ''.
 
--r|--reorder-if-jitter <true|false>  if jitter is specified for netem then should it reorder 
-                                     packets or send them in order. Default 'false' - send 
-                                     in order.
+--from <host[/mask]:port|none>
+    Match only packets from this address.
+    Example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+    Special value 'none' - match none.
+    Default 'none'.
+    Host with mask can be specified.
+
+--to <host[/mask]:port|none>
+    Match only packets from to this address.
+    Example '127.0.0.1:80', '*:80', '127.0.0.1/24:*', '*:*'.
+    Special value 'none' - match none.
+    Default 'none'.
+    Host with mask can be specified.
+
+-i|--interface <interface>
+    Matches only on this interface.
+    Example 'eth0', 'lo'.
+    Default 'eth0'.
+
+-r|--reorder-if-jitter <true|false>
+    If jitter is specified for netem then should it reorder packets or send them in order.
+    Default 'false' - send in order.
+
+-e|--exclude-ports <port[,port...]>
+    Exclude traffic to/from this port from any host from matching.
+    Used to prevent setting up rule that affects ssh session you run lossy in.
+    Example '22,80'.
+    Several port can be specified separated by comma.
+    Default '22'.
 ```
 
 # Important notes
 
 * Must be run as root.
+
+* All changes are cleared after reboot
 
 * Clears existing rules on specified interface before adding new rules, so if you launched it with '-i eth0' and then '-i lo'
   then rules on eth0 will remain. When invoking lossy with -c you can also add -i to specify interface to clear.
@@ -77,13 +92,13 @@ Options:
 * All settings are applied both to outgoing traffic and incoming traffic, so if you specify delay 100ms then roundtrip
   time will be 200ms. Use --from and --to to match packets more granularly.
 
-* Remember that your ssh session is affected by lossy also, so if you specify large delay, jitter, packet loss you may
-  not be able to disable it via ssh. However all settings are reset after system reboot.
+* Remember that your ssh session is affected by lossy also (if you alter -e option at least), so if you specify large 
+  delay, jitter, packet loss you may not be able to disable it via ssh. However all settings are reset after system reboot.
 
 * If both tbf and netem enabled then netem goes after tbf.
 
 * No need to specify 'limit' in tbf settings if netem is enabled, because netem also has 'limit' option and internal
-  pfifo qdisc, so traffic will mainly be affected by this setting which we set to 20 (packets) by default.
+  pfifo qdisc, so traffic will mainly be affected by this setting which we set to 1000 (packets) by default.
 
 * If 'large segment offload' option (also known as TSO/GSO) is enabled in kernel (check with 'ethtool -k eth0') then
   inside kernel packets can be larger than MTU and be broken into MTU-size chunks only by network interface. This leads
@@ -99,4 +114,4 @@ Options:
 
 * When configuring tbf set burst and limit high enough. Min burst is rate/250 (HZ=250 in many linux kernels) so 40k is
   required to reach 10Mb/sec speed. Sometimes packets can even fail to queue at all if limit is low (-s shows drops
-  increasing, but sent bytes stays the same) so always check your configuration with iperf.
+  increasing, but sent bytes stays the same) so always verify your configuration with iperf and ping tools.
